@@ -1,0 +1,17 @@
+chroma_db/
+qdrant_db/
+qdrant_storage/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+
+# Auth: never commit real user credentials
+auth/users.csv
+debug-*.log
