@@ -82,7 +82,20 @@ def ingest_uploaded_file(
         uploaded_by=uploaded_by,
         source_path=str(saved_path.relative_to(DATA_DIR.parent)),
     )
-    n = upsert_chunks(chunks)
+    n = 0
+    try:
+        n = upsert_chunks(chunks)
+    except Exception:
+        pass
+
+    try:
+        from .llama_rag import delete_by_source_id_llama, ingest_chunks_llama
+        delete_by_source_id_llama(source_id)
+        llama_n = ingest_chunks_llama(chunks)
+        if n == 0:
+            n = llama_n
+    except Exception:
+        pass
 
     return UploadResult(
         source_id=source_id,

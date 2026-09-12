@@ -32,13 +32,23 @@ def _print_summary(summary: dict) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate RAG retrieval quality.")
-    parser.add_argument("--mode", choices=["hybrid", "semantic", "keyword"], default="hybrid")
+    parser.add_argument("--mode", choices=["llama-index", "hybrid", "semantic", "keyword"], default="llama-index")
     parser.add_argument("--top-k", type=int, default=5)
-    parser.add_argument("--compare", action="store_true", help="Run all three search modes.")
+    parser.add_argument("--compare", action="store_true", help="Run all search modes.")
     parser.add_argument("--json", action="store_true", help="Print raw JSON instead of a table.")
     args = parser.parse_args()
 
-    n = collection_count()
+    n = 0
+    try:
+        from src.llama_rag import count_indexed_nodes
+        n = count_indexed_nodes()
+    except Exception:
+        pass
+    if n == 0:
+        try:
+            n = collection_count()
+        except Exception:
+            n = 0
     if n == 0:
         print("Knowledge base is empty. Run `python ingest.py` first.")
         return 1

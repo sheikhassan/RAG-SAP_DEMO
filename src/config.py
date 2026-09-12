@@ -8,9 +8,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 # --- Paths ----------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 DATA_DIR = PROJECT_ROOT / "data"
 QDRANT_DIR = PROJECT_ROOT / "qdrant_db"
 AUTH_DIR = PROJECT_ROOT / "auth"
@@ -19,9 +22,10 @@ USERS_CSV = AUTH_DIR / "users.csv"
 # --- Vector store (Qdrant: hybrid dense + sparse, HNSW ANN) ---------------
 
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "sap_docs")
-# Empty URL = embedded local disk. Set QDRANT_URL for a Qdrant server.
-QDRANT_URL = os.getenv("QDRANT_URL", "").strip()
+# Production default: a running Qdrant server. Embedded disk is opt-in only.
+QDRANT_URL = os.getenv("QDRANT_URL", "http://127.0.0.1:6333").strip()
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "").strip()
+QDRANT_EMBEDDED = os.getenv("QDRANT_EMBEDDED", "0").strip().lower() in {"1", "true", "yes"}
 
 # Dense (semantic) embeddings — local, open-source.
 EMBEDDING_MODEL_NAME = os.getenv(
@@ -41,8 +45,9 @@ HNSW_EF_CONSTRUCT = int(os.getenv("HNSW_EF_CONSTRUCT", "128"))
 HNSW_EF_SEARCH = int(os.getenv("HNSW_EF_SEARCH", "64"))
 HNSW_FULL_SCAN_THRESHOLD = int(os.getenv("HNSW_FULL_SCAN_THRESHOLD", "10000"))
 
-# hybrid | semantic | keyword
-SEARCH_MODE = os.getenv("SEARCH_MODE", "hybrid").strip().lower()
+# llama-index | hybrid | semantic | keyword
+SEARCH_MODE = os.getenv("SEARCH_MODE", "llama-index").strip().lower()
+USE_LLAMA_INDEX = os.getenv("USE_LLAMA_INDEX", "1").strip().lower() in {"1", "true", "yes"}
 HYBRID_PREFETCH_K = int(os.getenv("HYBRID_PREFETCH_K", "20"))
 # Reciprocal Rank Fusion constant (standard is 60).
 RRF_K = int(os.getenv("RRF_K", "60"))
@@ -55,13 +60,14 @@ TOP_K = int(os.getenv("TOP_K", "5"))
 MIN_DENSE_SCORE = float(os.getenv("MIN_DENSE_SCORE", "0.30"))
 
 # --- Context window / token budget ----------------------------------------
-# qwen2.5:3b default context is 32k. We reserve room for the system prompt,
-# the user question, and generated tokens so retrieved chunks cannot overflow.
+# qwen2.5:3b *can* do 32k, but a 32k KV cache often OOMs on laptops
+# (Windows 0xc0000005 / failed to allocate CPU buffer). 4096 is enough
+# for grounded RAG and fits in typical 8–16 GB RAM.
 
-LLM_CONTEXT_WINDOW = int(os.getenv("LLM_CONTEXT_WINDOW", "32768"))
-MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "6000"))
-GENERATION_RESERVE_TOKENS = int(os.getenv("GENERATION_RESERVE_TOKENS", "1024"))
-SYSTEM_RESERVE_TOKENS = int(os.getenv("SYSTEM_RESERVE_TOKENS", "800"))
+LLM_CONTEXT_WINDOW = int(os.getenv("LLM_CONTEXT_WINDOW", "4096"))
+MAX_CONTEXT_TOKENS = int(os.getenv("MAX_CONTEXT_TOKENS", "2048"))
+GENERATION_RESERVE_TOKENS = int(os.getenv("GENERATION_RESERVE_TOKENS", "512"))
+SYSTEM_RESERVE_TOKENS = int(os.getenv("SYSTEM_RESERVE_TOKENS", "400"))
 
 # --- LLM (default: free local Ollama running qwen2.5:3b) ------------------
 
@@ -150,8 +156,9 @@ SYSTEM_LABELS = {
     "s4hana": "SAP S/4HANA only",
 }
 
-SEARCH_MODES = ["hybrid", "semantic", "keyword"]
+SEARCH_MODES = ["llama-index", "hybrid", "semantic", "keyword"]
 SEARCH_MODE_LABELS = {
+    "llama-index": "LlamaIndex (VectorStoreIndex + RBAC Node Retriever)",
     "hybrid": "Hybrid (semantic + keyword, RRF)",
     "semantic": "Semantic only (HNSW / dense)",
     "keyword": "Keyword only (BM25 / sparse)",
@@ -163,3 +170,47 @@ NO_ANSWER_MESSAGE = (
     "I could not find this in your role's documentation. "
     "Please raise an IT ticket or check with your admin."
 )
+
+# Suggested questions shown on an empty chat — only topics the role can see.
+ROLE_SUGGESTIONS: dict[str, list[str]] = {
+    "finance": [
+        "How do I post a vendor invoice using MIRO?",
+        "How do I run a vendor payment with F110?",
+        "How do I post a GL journal in FB50?",
+    ],
+    "procurement": [
+        "How do I create a purchase order in S/4HANA?",
+        "How do I create a purchase requisition?",
+        "How do I post a goods receipt with MIGO?",
+    ],
+    "planning": [
+        "Walk me through the SIOP monthly cycle.",
+        "How does IBP demand planning work?",
+        "How do I run MRP with MD01?",
+    ],
+    "hr": [
+        "How do I reset my SAP password?",
+        "How do I manage SAP favorites and tiles?",
+        "What HR documents can I upload?",
+    ],
+    "manager": [
+        "How do I create a purchase order in S/4HANA?",
+        "How do I post a vendor invoice using MIRO?",
+        "Walk me through the SIOP monthly cycle.",
+    ],
+    "admin": [
+        "How do I create a purchase order in S/4HANA?",
+        "How do I post a vendor invoice using MIRO?",
+        "Walk me through the SIOP monthly cycle.",
+    ],
+}
+
+
+def suggestions_for_role(user_role: str) -> list[str]:
+    return ROLE_SUGGESTIONS.get(
+        user_role,
+        [
+            "How do I reset my SAP password?",
+            "How do I manage SAP favorites and tiles?",
+        ],
+    )

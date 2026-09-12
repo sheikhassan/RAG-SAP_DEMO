@@ -154,14 +154,28 @@ def evaluate_retrieval(
     rows: list[dict] = []
     started = time.perf_counter()
     for case in cases or GOLDEN_CASES:
-        hits = store_query(
-            case["query"],
-            allowed_roles=case["allowed_roles"],
-            system=case.get("system", "both"),
-            top_k=top_k,
-            search_mode=search_mode,
-        )
-        retrieved_ids = [str(h.metadata.get("source_id", "")) for h in hits]
+        if search_mode == "llama-index":
+            try:
+                from .llama_rag import retrieve_nodes_llama
+                l_hits = retrieve_nodes_llama(
+                    case["query"],
+                    allowed_roles=case["allowed_roles"],
+                    system=case.get("system", "both"),
+                    top_k=top_k,
+                )
+                retrieved_ids = [str(h.metadata.get("source_id", "")) for h in l_hits]
+            except Exception:
+                retrieved_ids = []
+        else:
+            hits = store_query(
+                case["query"],
+                allowed_roles=case["allowed_roles"],
+                system=case.get("system", "both"),
+                top_k=top_k,
+                search_mode=search_mode,
+            )
+            retrieved_ids = [str(h.metadata.get("source_id", "")) for h in hits]
+
         expected = list(case["expected_source_ids"])
         rows.append(
             {
@@ -178,6 +192,15 @@ def evaluate_retrieval(
         )
 
     n = len(rows) or 1
+    current_store = store_info()
+    if search_mode == "llama-index":
+        try:
+            from .llama_rag import get_backend_name
+            current_store = dict(current_store)
+            current_store["backend"] = f"LlamaIndex ({get_backend_name()})"
+        except Exception:
+            pass
+
     summary = {
         "search_mode": search_mode,
         "top_k": top_k,
@@ -188,15 +211,15 @@ def evaluate_retrieval(
         "mrr": round(sum(r["mrr"] for r in rows) / n, 4),
         "ndcg@k": round(sum(r["ndcg@k"] for r in rows) / n, 4),
         "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
-        "store": store_info(),
+        "store": current_store,
         "cases": rows,
     }
     return summary
 
 
 def compare_search_modes(top_k: int = TOP_K) -> dict:
-    """Evaluate hybrid vs semantic vs keyword on the same golden set."""
-    modes = ["hybrid", "semantic", "keyword"]
+    """Evaluate LlamaIndex vs hybrid vs semantic vs keyword on the same golden set."""
+    modes = ["llama-index", "hybrid", "semantic", "keyword"]
     by_mode = {mode: evaluate_retrieval(search_mode=mode, top_k=top_k) for mode in modes}
     leaderboard = [
         {

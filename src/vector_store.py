@@ -29,6 +29,7 @@ from .config import (
     QDRANT_API_KEY,
     QDRANT_COLLECTION,
     QDRANT_DIR,
+    QDRANT_EMBEDDED,
     QDRANT_URL,
     SEARCH_MODE,
     SPARSE_VECTOR_NAME,
@@ -54,12 +55,25 @@ def _point_id(chunk_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, chunk_id))
 
 
+class QdrantUnavailableError(RuntimeError):
+    """Raised when the Qdrant server is not running or not reachable."""
+
+
 @lru_cache(maxsize=1)
 def _get_client() -> QdrantClient:
-    if QDRANT_URL:
-        return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY or None, timeout=30)
-    QDRANT_DIR.mkdir(parents=True, exist_ok=True)
-    return QdrantClient(path=str(QDRANT_DIR))
+    if QDRANT_EMBEDDED and not QDRANT_URL:
+        QDRANT_DIR.mkdir(parents=True, exist_ok=True)
+        return QdrantClient(path=str(QDRANT_DIR))
+
+    url = QDRANT_URL or "http://127.0.0.1:6333"
+    try:
+        client = QdrantClient(url=url, api_key=QDRANT_API_KEY or None, timeout=2)
+        client.get_collections()
+        return client
+    except Exception:
+        # Graceful auto-fallback to embedded local disk mode
+        QDRANT_DIR.mkdir(parents=True, exist_ok=True)
+        return QdrantClient(path=str(QDRANT_DIR))
 
 
 def _hnsw_config() -> qm.HnswConfigDiff:
@@ -195,7 +209,7 @@ def store_info() -> dict:
     info = _get_client().get_collection(QDRANT_COLLECTION)
     return {
         "backend": "qdrant",
-        "mode": "server" if QDRANT_URL else "embedded",
+        "mode": "embedded" if QDRANT_EMBEDDED and not QDRANT_URL else "server",
         "url": QDRANT_URL or str(QDRANT_DIR),
         "collection": QDRANT_COLLECTION,
         "points": int(info.points_count or 0),

@@ -69,22 +69,111 @@ def _is_identity_smalltalk(user_query: str) -> bool:
 
 SYSTEM_PROMPT = """You are the Drive Medical SAP Training Assistant.
 
-You answer questions about Drive Medical's SAP processes (ECC and S/4HANA).
+Answer the user's SAP question from the CONTEXT sources.
 
-STRICT RULES — you MUST follow these:
-1. Use ONLY the information in the "CONTEXT" section below. Do NOT use any
-   outside SAP knowledge, even if you know the answer.
-2. If the context does not contain enough information to answer, reply with
-   exactly this sentence and nothing else:
-   "{no_answer}"
-3. When you do answer, be concrete and step-by-step. Preserve transaction
-   codes (e.g. ME21N, MIRO), Fiori app names, field names, and any Drive
-   Medical-specific values (company codes, plant numbers, thresholds).
-4. After your answer, include a "Sources:" line listing the source_id values
-   you actually used, comma-separated. Do not invent source ids.
-5. Keep the tone professional and concise. Use markdown headings, numbered
-   lists, and bold for field names where it helps clarity.
+Rules:
+1. Use ONLY the CONTEXT. Do not invent transaction codes or policy values.
+2. Pick the source that matches the question (title, source_id, or T-code
+   such as MIRO, ME21N, F110, MIGO, FB50, MD01). Ignore unrelated sources.
+3. Write a concrete step-by-step answer. Keep Drive Medical-specific values
+   (thresholds, tax codes, document-number prefixes, Fiori app names).
+4. Only if NONE of the sources discuss the asked process, reply with exactly:
+   {no_answer}
+5. End with a line: Sources: <source_id>, ...
 """
+
+_RETRY_PROMPT = (
+    "The CONTEXT does contain the procedure for this question. "
+    "Do not refuse. Extract the matching source and write the steps."
+)
+
+_STOPWORDS = {
+    "how", "do", "i", "a", "an", "the", "in", "on", "at", "to", "of", "and",
+    "or", "for", "my", "me", "using", "with", "about", "what", "is", "are",
+    "please", "walk", "through", "can", "you", "your", "this", "that",
+}
+
+
+def _terms(text: str) -> set[str]:
+    return {
+        t for t in re.findall(r"[a-z0-9]{3,}", (text or "").lower())
+        if t not in _STOPWORDS
+    }
+
+
+def _overlap(query: str, chunk: RetrievedChunk) -> float:
+    q = _terms(query)
+    if not q:
+        return 0.0
+    blob = " ".join(
+        [
+            chunk.text,
+            str(chunk.metadata.get("title", "")),
+            str(chunk.metadata.get("source_id", "")),
+        ]
+    )
+    return len(q & _terms(blob)) / len(q)
+
+
+def _drop_distractors(query: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    """Keep the relevant hits, enforcing T-code presence when specified."""
+    if not chunks:
+        return []
+    try:
+        from .llama_rag import extract_tcodes
+        q_tcodes = extract_tcodes(query)
+    except Exception:
+        q_tcodes = set()
+
+    if q_tcodes:
+        matching: list[RetrievedChunk] = []
+        for c in chunks:
+            title_id = f"{c.metadata.get('title', '')} {c.metadata.get('source_id', '')}".upper()
+            if any(tc in title_id for tc in q_tcodes):
+                matching.append(c)
+        if not matching:
+            return []
+        chunks = matching
+
+    top_score = chunks[0].score if chunks else 0.0
+    top_ov = _overlap(query, chunks[0])
+    if top_score < 0.42 and top_ov < 0.20:
+        return []
+
+    kept: list[RetrievedChunk] = []
+    for i, chunk in enumerate(chunks):
+        if i == 0 or _overlap(query, chunk) >= 0.20 or chunk.score >= 0.45:
+            kept.append(chunk)
+    return kept
+
+
+def _is_refusal(answer: str) -> bool:
+    text = (answer or "").strip()
+    if not text:
+        return True
+    if text == NO_ANSWER_MESSAGE:
+        return True
+    # Model sometimes appends "Sources: ..." after the canned refusal.
+    if text.startswith(NO_ANSWER_MESSAGE) and len(text) < len(NO_ANSWER_MESSAGE) + 80:
+        return True
+    return False
+
+
+def _extractive_fallback(chunks: list[RetrievedChunk]) -> str:
+    """Grounded answer from retrieved text when the small LLM refuses."""
+    blocks: list[str] = ["Here is the procedure from your role's documentation:\n"]
+    seen: list[str] = []
+    for chunk in chunks:
+        sid = str(chunk.metadata.get("source_id", "DOC"))
+        title = str(chunk.metadata.get("title", "Untitled"))
+        if sid not in seen:
+            blocks.append(f"### {title} (`{sid}`)\n")
+            seen.append(sid)
+        blocks.append(chunk.text.strip())
+        blocks.append("")
+    if seen:
+        blocks.append("Sources: " + ", ".join(seen))
+    return "\n".join(blocks)
 
 
 @dataclass
@@ -132,6 +221,28 @@ def retrieve(
     top_k: int = TOP_K,
     search_mode: str | None = None,
 ) -> list[RetrievedChunk]:
+    mode = (search_mode or SEARCH_MODE or "llama-index").strip().lower()
+    if mode == "llama-index":
+        try:
+            from .llama_rag import retrieve_nodes_llama
+            nodes = retrieve_nodes_llama(
+                user_query=user_query,
+                allowed_roles=allowed_roles,
+                system=system,
+                top_k=top_k,
+            )
+            return [
+                RetrievedChunk(
+                    chunk_id=n.chunk_id,
+                    text=n.text,
+                    metadata=n.metadata,
+                    score=n.score,
+                    search_mode="llama-index",
+                )
+                for n in nodes
+            ]
+        except Exception:
+            pass
     return query(
         user_query,
         allowed_roles=allowed_roles,
@@ -212,6 +323,34 @@ def _configure_gemini():
     )
 
 
+def _fitted_num_ctx(budget: ContextBudget) -> int:
+    """Ask Ollama only for the KV cache we need — not a 32k reservation."""
+    needed = (
+        budget.used
+        + budget.reserved_system
+        + budget.query_tokens
+        + budget.reserved_generation
+        + 64
+    )
+    rounded = 1
+    while rounded < needed:
+        rounded *= 2
+    return max(2048, min(LLM_CONTEXT_WINDOW, rounded))
+
+
+def _is_ollama_oom(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(
+        needle in msg
+        for needle in (
+            "failed to allocate",
+            "out of memory",
+            "0xc0000005",
+            "alloc_tensor_range",
+        )
+    )
+
+
 def _empty_budget() -> ContextBudget:
     return ContextBudget(
         window=LLM_CONTEXT_WINDOW,
@@ -263,6 +402,58 @@ def generate_answer(
             metrics=record(metrics),
         )
 
+    if mode == "llama-index":
+        try:
+            from .llama_rag import run_llama_query
+            ans, l_chunks, l_used_llm, l_latency = run_llama_query(
+                user_query=user_query,
+                allowed_roles=allowed_roles,
+                system=system,
+                top_k=top_k,
+            )
+            converted = [
+                RetrievedChunk(
+                    chunk_id=c.chunk_id,
+                    text=c.text,
+                    metadata=c.metadata,
+                    score=c.score,
+                    search_mode="llama-index",
+                )
+                for c in l_chunks
+            ]
+            is_ref = (ans == NO_ANSWER_MESSAGE or ans.startswith(NO_ANSWER_MESSAGE))
+            if is_ref:
+                ans = NO_ANSWER_MESSAGE
+                converted = []
+            budget = ContextBudget(
+                window=LLM_CONTEXT_WINDOW,
+                reserved_system=400,
+                reserved_generation=512,
+                query_tokens=0,
+                available=LLM_CONTEXT_WINDOW - 912,
+                used=0,
+                utilization=0.0,
+                chunks_kept=len(converted),
+                chunks_dropped=0,
+            )
+            metrics = build_query_metrics(
+                search_mode="llama-index",
+                chunks=converted,
+                packed=converted,
+                budget=budget,
+                retrieve_ms=l_latency * 0.4,
+                generate_ms=l_latency * 0.6 if l_used_llm else 0.0,
+                total_ms=(time.perf_counter() - t0) * 1000,
+            )
+            return RagResponse(
+                answer=ans,
+                sources=converted,
+                used_llm=l_used_llm,
+                metrics=record(metrics),
+            )
+        except Exception:
+            pass  # Fall through to standard retrieval pipeline
+
     t_ret = time.perf_counter()
     chunks = retrieve(
         user_query,
@@ -271,7 +462,7 @@ def generate_answer(
         top_k=top_k,
         search_mode=mode,
     )
-    relevant = _filter_relevant(chunks, mode)
+    relevant = _drop_distractors(user_query, _filter_relevant(chunks, mode))
     packed, budget = pack_chunks(relevant, user_query, system_instruction)
     retrieve_ms = (time.perf_counter() - t_ret) * 1000
 
@@ -297,10 +488,13 @@ def generate_answer(
     provider = LLM_PROVIDER if LLM_PROVIDER in ("ollama", "gemini") else "ollama"
 
     def _finish(answer: str, used_llm: bool, generate_ms: float) -> RagResponse:
+        is_ref = _is_refusal(answer)
+        if is_ref:
+            answer = NO_ANSWER_MESSAGE
         metrics = build_query_metrics(
             search_mode=mode,
             chunks=relevant,
-            packed=packed,
+            packed=packed if not is_ref else [],
             budget=budget,
             retrieve_ms=retrieve_ms,
             generate_ms=generate_ms,
@@ -308,33 +502,67 @@ def generate_answer(
         )
         return RagResponse(
             answer=answer,
-            sources=packed,
+            sources=packed if not is_ref else [],
             used_llm=used_llm,
             metrics=record(metrics),
         )
 
     if provider == "ollama":
-        t_gen = time.perf_counter()
         try:
-            answer_text = ollama_chat(
-                OLLAMA_BASE_URL,
-                OLLAMA_MODEL,
-                system_instruction,
-                prompt,
-                timeout_sec=OLLAMA_TIMEOUT_SEC,
-                num_ctx=LLM_CONTEXT_WINDOW,
-                temperature=OLLAMA_TEMPERATURE,
-            )
+            from .llama_rag import _check_server_reachable
+            if not _check_server_reachable(OLLAMA_BASE_URL, timeout=0.5):
+                if packed:
+                    return _finish(_extractive_fallback(packed), False, 0.0)
+                return _finish(_format_ollama_unreachable_help(), False, 0.0)
+        except Exception:
+            pass
+
+        t_gen = time.perf_counter()
+        num_ctx = _fitted_num_ctx(budget)
+
+        def _ollama_once(user_prompt: str) -> str:
+            try:
+                return ollama_chat(
+                    OLLAMA_BASE_URL,
+                    OLLAMA_MODEL,
+                    system_instruction,
+                    user_prompt,
+                    timeout_sec=OLLAMA_TIMEOUT_SEC,
+                    num_ctx=num_ctx,
+                    temperature=OLLAMA_TEMPERATURE,
+                )
+            except (OllamaHTTPError, OllamaRuntimeError) as exc:
+                if num_ctx > 2048 and _is_ollama_oom(exc):
+                    return ollama_chat(
+                        OLLAMA_BASE_URL,
+                        OLLAMA_MODEL,
+                        system_instruction,
+                        user_prompt,
+                        timeout_sec=OLLAMA_TIMEOUT_SEC,
+                        num_ctx=2048,
+                        temperature=OLLAMA_TEMPERATURE,
+                    )
+                raise
+
+        try:
+            answer_text = _ollama_once(prompt)
+            if _is_refusal(answer_text) and packed:
+                answer_text = _ollama_once(prompt + "\n\n" + _RETRY_PROMPT)
+            if _is_refusal(answer_text) and packed:
+                return _finish(_extractive_fallback(packed), False, (time.perf_counter() - t_gen) * 1000)
             if not answer_text.strip():
                 answer_text = NO_ANSWER_MESSAGE
         except OllamaUnreachableError:
+            if packed:
+                return _finish(_extractive_fallback(packed), False, 0.0)
             return _finish(_format_ollama_unreachable_help(), False, 0.0)
         except (OllamaHTTPError, OllamaRuntimeError, OllamaError) as exc:
+            if packed:
+                return _finish(_extractive_fallback(packed), False, 0.0)
             answer_text = (
-                "**Ollama error.** The retrieved sources below still contain "
-                "relevant text.\n\n"
-                f"*Detail: {type(exc).__name__}: {str(exc)[:400]}*\n\n"
-                f"Try: **`ollama pull {OLLAMA_MODEL}`**"
+                "**Ollama ran out of memory loading the model context.** "
+                "Retrieval still worked — expand **Sources** below.\n\n"
+                f"*Detail: {type(exc).__name__}: {str(exc)[:280]}*"
             )
             return _finish(answer_text, False, 0.0)
         return _finish(answer_text, True, (time.perf_counter() - t_gen) * 1000)
@@ -354,6 +582,8 @@ def generate_answer(
         answer_text, _note = _safe_gemini_text(response)
         if not answer_text.strip():
             answer_text = NO_ANSWER_MESSAGE
+        if _is_refusal(answer_text) and packed:
+            return _finish(_extractive_fallback(packed), False, (time.perf_counter() - t_gen) * 1000)
     except Exception as exc:  # noqa: BLE001 - SDK raises generic exceptions
         return _finish(_format_gemini_user_error(exc), False, 0.0)
     return _finish(answer_text, True, (time.perf_counter() - t_gen) * 1000)

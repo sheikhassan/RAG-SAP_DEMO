@@ -35,22 +35,26 @@ def main() -> int:
         print("Resetting Qdrant collection ...")
         reset_collection()
 
-    print(f"Loaded {len(chunks)} chunks. Embedding (dense + BM25) and upserting ...")
-    n = upsert_chunks(chunks)
+    n = 0
+    try:
+        n = upsert_chunks(chunks)
+        print(f"Qdrant: upserted {n} chunks.")
+    except Exception as exc:
+        print(f"Qdrant server note (proceeding with LlamaIndex): {exc}")
+
+    print("Indexing into LlamaIndex VectorStoreIndex ...")
+    try:
+        from src.llama_rag import get_backend_name, ingest_chunks_llama
+        n_llama = ingest_chunks_llama(chunks)
+        print(f"LlamaIndex [{get_backend_name()}]: successfully indexed {n_llama} nodes.")
+    except Exception as exc:
+        print(f"LlamaIndex indexing error: {exc}")
 
     by_role = Counter(c.metadata["role"] for c in chunks)
     by_system = Counter(c.metadata["system"] for c in chunks)
     by_source = Counter(c.metadata["source_id"] for c in chunks)
-    info = store_info()
 
-    print(f"\nUpserted {n} chunks.")
-    print(f"Collection now contains {collection_count()} chunks.")
-    print(
-        f"Index: {info['ann_algorithm']} (M={info['hnsw_m']}, "
-        f"ef_construct={info['hnsw_ef_construct']}) + BM25 sparse"
-    )
-    print(f"Backend: {info['backend']} ({info['mode']}) @ {info['url']}\n")
-    print("Chunks per role:")
+    print("\nChunks per role:")
     for role, count in sorted(by_role.items()):
         print(f"  {role:<14} {count}")
     print("\nChunks per system:")

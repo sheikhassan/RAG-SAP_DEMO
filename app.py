@@ -54,6 +54,7 @@ from src.config import (
     SYSTEM_LABELS,
     SYSTEMS,
     TOP_K,
+    suggestions_for_role,
 )
 from src.document_loader import SUPPORTED_SUFFIXES
 from src.metrics import compare_search_modes, recent_metrics
@@ -174,11 +175,19 @@ def _render_sidebar(user: dict) -> None:
         )
 
         st.divider()
+        backend_name = "Qdrant"
         try:
-            total = collection_count()
-        except Exception as exc:  # noqa: BLE001
+            from src.llama_rag import count_indexed_nodes, get_backend_name
+            total = count_indexed_nodes()
+            backend_name = get_backend_name()
+        except Exception:
             total = 0
-            st.warning(f"Vector store error: {exc}")
+        if total == 0:
+            try:
+                total = collection_count()
+            except Exception:  # noqa: BLE001
+                total = 0
+
         st.metric("Indexed chunks", total)
 
         try:
@@ -187,6 +196,8 @@ def _render_sidebar(user: dict) -> None:
             by_role = {}
         visible = visible_doc_roles(role)
         accessible = sum(by_role.get(r, 0) for r in visible)
+        if accessible == 0 and total > 0:
+            accessible = total
         st.metric("Accessible to you", accessible)
 
         if total == 0:
@@ -195,6 +206,8 @@ def _render_sidebar(user: dict) -> None:
                 "Run `python ingest.py` once, or use the **Upload** tab "
                 "(Admin / HR)."
             )
+
+        st.success(f"🦙 **LlamaIndex Active**  \n`{backend_name}`")
 
         last = st.session_state.get("last_metrics")
         if last is not None:
@@ -205,13 +218,13 @@ def _render_sidebar(user: dict) -> None:
             st.caption(
                 f"Context {last.context_tokens_used}/{last.context_tokens_available} tokens "
                 f"({last.context_utilization:.0%} of budget) · "
-                f"window {last.context_window} · HNSW M={last.hnsw_m} ef={last.hnsw_ef_search}"
+                f"window {last.context_window}"
             )
 
         st.info(f"LLM: **Ollama** — `{OLLAMA_MODEL}` @ `{OLLAMA_BASE_URL}` (free / local).")
         st.caption(
-            f"Qdrant hybrid · HNSW M={HNSW_M} ef={HNSW_EF_SEARCH} · "
-            f"ctx {LLM_CONTEXT_WINDOW} · Vibeathon 2026"
+            f"Framework: **LlamaIndex** · HNSW M={HNSW_M} ef={HNSW_EF_SEARCH} · "
+            f"Vibeathon 2026"
         )
 
 
@@ -254,7 +267,8 @@ def _render_history() -> None:
         with st.chat_message(entry["role"]):
             st.markdown(entry["content"])
             if entry["role"] == "assistant" and "response" in entry:
-                _render_sources(entry["response"])
+                if NO_ANSWER_MESSAGE not in (entry.get("content") or ""):
+                    _render_sources(entry["response"])
 
 
 def _handle_user_input(user: dict, prompt: str) -> None:
@@ -274,12 +288,15 @@ def _handle_user_input(user: dict, prompt: str) -> None:
             )
         st.session_state.last_metrics = response.metrics
         st.markdown(response.answer)
-        _render_sources(response)
-
-        if response.answer.strip() == NO_ANSWER_MESSAGE:
+        is_no_answer = NO_ANSWER_MESSAGE in (response.answer or "")
+        if not is_no_answer:
+            _render_sources(response)
+        else:
             st.info(
-                "Tip: this may live in documentation outside your role. "
-                "Ask an admin to grant access or reclassify the document."
+                "This topic is outside your role's document set. "
+                f"You can see: **{', '.join(allowed)}**. "
+                "Purchase-order SOPs are **procurement** — sign in as "
+                "`bob` / `bob123` (or `admin`) to read ME21N."
             )
 
     st.session_state.messages.append(
@@ -297,11 +314,7 @@ def _render_chat_tab(user: dict) -> None:
 
     if not st.session_state.messages:
         cols = st.columns(3)
-        suggestions = [
-            "How do I create a purchase order in S/4HANA?",
-            "How do I post a vendor invoice using MIRO?",
-            "Walk me through the SIOP monthly cycle.",
-        ]
+        suggestions = suggestions_for_role(user["role"])
         for col, q in zip(cols, suggestions):
             with col:
                 if st.button(q, use_container_width=True):

@@ -12,7 +12,7 @@ measurable retrieval quality.
 |------------------|-------------------------------------------------------------------|
 | Auth             | CSV-backed users, **PBKDF2-SHA256** + **JWT (HS256)**             |
 | RBAC             | Per-role document visibility + upload permissions                 |
-| Vector store     | **Qdrant** (embedded `./qdrant_db`, or a server via `QDRANT_URL`) |
+| Vector store     | **Qdrant server** (`docker compose`, `http://127.0.0.1:6333`)     |
 | ANN index        | **HNSW** (Hierarchical Navigable Small World), cosine             |
 | Keyword search   | **BM25** sparse vectors (FastEmbed `Qdrant/bm25`)                 |
 | Fusion           | **Reciprocal Rank Fusion (RRF)** — hybrid = semantic + keyword    |
@@ -95,26 +95,32 @@ lists. Switch modes in the sidebar: Hybrid / Semantic only / Keyword only.
 > Prereqs:
 >
 > 1. Python 3.10+ (project tested on 3.10).
-> 2. **Ollama** running locally with `qwen2.5:3b` pulled:
+> 2. **Docker Desktop** running (this project uses a real Qdrant server, not a local folder).
+> 3. **Ollama** running locally with `qwen2.5:3b` pulled:
 >    ```bash
 >    ollama pull qwen2.5:3b
 >    ```
 
 ```powershell
-# 1. Create + activate venv (Windows PowerShell)
+# 1. Start the Qdrant database server
+docker compose up -d
+# or: .\start_qdrant.ps1
+# Dashboard: http://127.0.0.1:6333/dashboard
+
+# 2. Create + activate venv (Windows PowerShell)
 py -3.10 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# 2. Install dependencies
+# 3. Install dependencies
 pip install -r requirements.txt
 
-# 3. Index the bundled SAP docs into Qdrant (dense + BM25)
+# 4. Index the bundled SAP docs into the Qdrant server (dense + BM25)
 python ingest.py --reset
 
-# 4. Optional: measure retrieval quality
+# 5. Optional: measure retrieval quality
 python eval.py --compare
 
-# 5. Launch
+# 6. Launch
 streamlit run app.py
 # or always-correct-interpreter:
 .\.venv\Scripts\python.exe -m streamlit run app.py
@@ -124,8 +130,8 @@ streamlit run app.py
 
 Open <http://localhost:8501> and sign in.
 
-Embedded Qdrant locks the `./qdrant_db` folder. Stop Streamlit before
-re-running `ingest.py`, or run Qdrant as a server (see §7).
+`.env` must contain `QDRANT_URL=http://127.0.0.1:6333`. If the server is down,
+ingest and chat fail with a clear error instead of silently using a toy file store.
 
 ---
 
@@ -290,8 +296,8 @@ LLM_CONTEXT_WINDOW=32768
 MAX_CONTEXT_TOKENS=6000
 GENERATION_RESERVE_TOKENS=1024
 
-# Optional Qdrant server (otherwise embedded ./qdrant_db)
-# QDRANT_URL=http://127.0.0.1:6333
+# Qdrant server (required)
+QDRANT_URL=http://127.0.0.1:6333
 # QDRANT_API_KEY=
 
 # Optional Gemini fallback
@@ -302,13 +308,15 @@ GENERATION_RESERVE_TOKENS=1024
 
 > **Always** set a strong `JWT_SECRET` for any non-demo deployment.
 
-### Optional Qdrant server (recommended if ingest + UI run together)
+### Qdrant server
 
 ```powershell
 docker compose up -d
-# then set QDRANT_URL=http://127.0.0.1:6333 in .env
+# QDRANT_URL=http://127.0.0.1:6333 is already in .env
 python ingest.py --reset
 ```
+
+Dashboard: <http://127.0.0.1:6333/dashboard>
 
 ---
 
@@ -319,7 +327,8 @@ app.py                 # Streamlit entry: login + chat + upload + KB + metrics
 ingest.py              # CLI: batch ingest data/ -> Qdrant (dense + BM25)
 eval.py                # CLI: Hit Rate / MRR / nDCG for hybrid vs baselines
 run_app.ps1            # PowerShell helper: always uses .venv interpreter
-docker-compose.yml     # Optional Qdrant server
+docker-compose.yml     # Qdrant server
+start_qdrant.ps1       # Starts Docker Desktop Qdrant container
 requirements.txt
 .env / .env.example
 
@@ -348,7 +357,7 @@ data/                  # SAP markdown docs (seed knowledge base)
   procurement/
   planning/
 
-qdrant_db/             # embedded Qdrant store (gitignored)
+qdrant_db/             # unused unless QDRANT_EMBEDDED=1 (gitignored)
 ```
 
 ---

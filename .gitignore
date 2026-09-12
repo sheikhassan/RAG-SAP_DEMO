@@ -15,3 +15,5 @@ venv/
 # Auth: never commit real user credentials
 auth/users.csv
 debug-*.log
+*.log
+storage/

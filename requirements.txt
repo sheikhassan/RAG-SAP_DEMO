@@ -1,23 +1,30 @@
 # Streamlit chat UI
-streamlit==1.39.0
+streamlit>=1.39.0
+
+# LlamaIndex Core & Integrations
+llama-index-core>=0.11.0
+llama-index-embeddings-huggingface>=0.3.0
+llama-index-llms-ollama>=0.3.0
+llama-index-vector-stores-qdrant>=0.3.0
+llama-index-vector-stores-chroma>=0.2.0
 
 # Vector store: Qdrant hybrid (HNSW dense + BM25 sparse)
-qdrant-client==1.13.3
-fastembed==0.6.1
+qdrant-client>=1.12.0
+fastembed>=0.5.0
 
 # Dense embeddings (free, open-source)
-sentence-transformers==3.2.1
+sentence-transformers>=3.0.0
 
 # Document loaders for upload (md / txt / pdf / docx)
-PyYAML==6.0.2
-pypdf==5.1.0
-python-docx==1.1.2
+PyYAML>=6.0.0
+pypdf>=5.0.0
+python-docx>=1.1.0
 
-# Auth (JWT, bcrypt-style hashing uses stdlib hashlib so no extra dep)
-PyJWT==2.9.0
+# Auth (JWT, PBKDF2 hashing)
+PyJWT>=2.9.0
 
 # Env
-python-dotenv==1.0.1
+python-dotenv>=1.0.0
 
-# Optional: only needed if LLM_PROVIDER=gemini
-google-generativeai==0.8.3
+# Optional: Gemini support
+google-generativeai>=0.8.0
